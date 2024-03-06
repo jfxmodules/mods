@@ -972,7 +972,6 @@ public final class SortedList<E> extends TransformationList<E, E> {
     
     private void threadNotifyUiFilteredChange(Predicate<E> predicate) {
         var latch = new CountDownLatch(1);
-        var elementsToRemove = filteredList.getElements();
         Platform.runLater(()-> {
             LOGGER.fine("Adding new filteredList back into TableView on UI thread.");
             notifyUiFilteredChange(predicate);
