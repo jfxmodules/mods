@@ -35,6 +35,7 @@ import javafx.collections.ObservableList;
 import org.jfxmodules.mods.table.internals.ThreadSafeChange;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.AfterAll;
 
 public class ThreadedSortedListTest {
     static final Logger LOGGER = Logger.getLogger(ThreadedSortedListTest.class.getName()); 
@@ -51,7 +52,7 @@ public class ThreadedSortedListTest {
             h.setLevel(Level.FINE);
         }
     }
-
+    
     @BeforeEach
     public void setUp() {
         list = FXCollections.observableArrayList();
@@ -160,18 +161,18 @@ public class ThreadedSortedListTest {
         var countdown2 = new CountDownLatch(1);
         new Thread(()-> {
             try {
-                counter.await();
-                assertEquals(5, callCount.get());
-                assertEquals(8, sortedList.size());
-                assertEquals(Arrays.asList("2", "2", "2", "2"), sortedList.subList(0, 4));
-                assertEquals(Arrays.asList("6", "6", "6", "6"), sortedList.subList(4, sortedList.size()));
+                counter.await();                
             } catch (InterruptedException ex) {
                 //do nothing
             } finally {
                 countdown2.countDown();                
             }
         }).start();
-        countdown2.await(2, TimeUnit.SECONDS);
+        countdown2.await(4, TimeUnit.SECONDS);
+        assertEquals(5, callCount.get());
+        assertEquals(8, sortedList.size());
+        assertEquals(Arrays.asList("2", "2", "2", "2"), sortedList.subList(0, 4));
+        assertEquals(Arrays.asList("6", "6", "6", "6"), sortedList.subList(4, sortedList.size()));
     }    
     
     @Test
