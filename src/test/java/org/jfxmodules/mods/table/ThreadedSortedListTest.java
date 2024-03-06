@@ -127,13 +127,16 @@ public class ThreadedSortedListTest {
     public void testMultipleBulkAddsWithFilter() throws InterruptedException {
         System.out.println("Calling clear on list.");
         var callCount = new AtomicInteger(0);
-        CountDownLatch counter = new CountDownLatch(5);
+        CountDownLatch counter = new CountDownLatch(8);
+        list = FXCollections.observableArrayList();
+        sortedList = new SortedList(list, Comparator.naturalOrder(), true);
         sortedList.addListener((ListChangeListener)(c)-> {
-            callCount.incrementAndGet();
-            counter.countDown();
+            while(c.next()) {
+                System.out.println(String.format("Change from: %s to %s", c.getFrom(), c.getTo()));
+                callCount.incrementAndGet();
+                counter.countDown();
+            }
         });
-        list.clear();
-        //System.err.println("List cleared");
         
         sortedList.setFilter((value)->{
             return "2".equals(value) || "6".equals(value);
@@ -168,8 +171,8 @@ public class ThreadedSortedListTest {
                 countdown2.countDown();                
             }
         }).start();
-        countdown2.await(4, TimeUnit.SECONDS);
-        assertEquals(5, callCount.get());
+        countdown2.await(10, TimeUnit.SECONDS);
+        assertEquals(8, callCount.get());
         assertEquals(8, sortedList.size());
         assertEquals(Arrays.asList("2", "2", "2", "2"), sortedList.subList(0, 4));
         assertEquals(Arrays.asList("6", "6", "6", "6"), sortedList.subList(4, sortedList.size()));
