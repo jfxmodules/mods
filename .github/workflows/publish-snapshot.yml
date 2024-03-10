@@ -1,3 +1,5 @@
+name: publish_snapshot
+
 on:
   workflow_run:
     workflows: ["maven_build_main_and_develop"]
