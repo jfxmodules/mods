@@ -1,6 +1,6 @@
 on:
   workflow_run:
-    workflows: ["build"]
+    workflows: ["maven_build_main_and_develop"]
     types:
       - completed
     branches:
