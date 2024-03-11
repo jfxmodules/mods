@@ -13,21 +13,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout develop
-        uses: actions/checkout@v4
-        with:
-          ref: develop
-        
       - name: Setup Maven Action
         uses: s4u/setup-maven-action@v1.12.0
         with:
+          checkout-ref: develop
           java-version: 21
           maven-version: 3.9.6        
 
       - name: Publish SNAPSHOT version to GitHub Packages (we can skip tests, since we only deploy, if the build workflow succeeded)        
         run: |
           git branch
-          mvn -B --no-transfer-progress deploy -DskipTests
-          
+          mvn -B --no-transfer-progress deploy -DskipTests          
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
