@@ -11,7 +11,9 @@ on:
 jobs:
   publish-snapshot:
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Setup Maven Action
         uses: s4u/setup-maven-action@v1.12.0
