@@ -13,6 +13,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout develop
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+        run: git branch
+        
       - name: Setup Maven Action
         uses: s4u/setup-maven-action@v1.12.0
         with:
