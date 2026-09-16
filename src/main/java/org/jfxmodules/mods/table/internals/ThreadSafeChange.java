@@ -54,7 +54,15 @@ public final class ThreadSafeChange<E> extends Change<E> {
                 perm = new int[permSize];
                 var permCount = 0;
                 for( int i = change.getFrom(); i < change.getTo(); i++) {
-                    perm[permCount] = i;
+                    try {
+                        perm[permCount] = change.getPermutation(i);
+                    } catch (IndexOutOfBoundsException ex) {
+                        try {
+                            perm[permCount] = change.getPermutation(permCount);
+                        } catch (IndexOutOfBoundsException ignored) {
+                            perm[permCount] = i;
+                        }
+                    }
                     permCount++;
                 }
             } else {
@@ -67,7 +75,7 @@ public final class ThreadSafeChange<E> extends Change<E> {
             changes.add(changeRecord);            
         }
         change.reset();
-        return new ThreadSafeChange(change.getList(), changes);
+        return new ThreadSafeChange(listInstance, changes);
     }
 
     private ThreadSafeChange(ObservableList<E> source, List<ChangeRecord<E>> changes) {

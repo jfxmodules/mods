@@ -147,6 +147,7 @@ public final class SortedList<E> extends TransformationList<E, E> {
     private final Comparator<IdAndIndex> idComparator = (e1, e2)->Long.compare(e1.id(), e2.id());
     private final boolean threaded;
     private final ExecutorService es = Executors.newSingleThreadExecutor();
+    private final Object stateLock = new Object();
     private boolean applyFilter;    
     private long lastId = 0;    
     private final AtomicInteger size = new AtomicInteger(0);
@@ -228,7 +229,7 @@ public final class SortedList<E> extends TransformationList<E, E> {
 
     private void loadElements(ObservableList<? extends E> source) {
         for (int i = 0; i < source.size(); ++i) {
-            var e = new Element<>(lastId++, source.get(i));
+            Element<E> e = new Element<>(lastId++, source.get(i));
             var idAndIndex = new IdAndIndex(e.id(), i);
             unsorted.add(e);
             unsortedById.add(idAndIndex);
@@ -258,7 +259,8 @@ public final class SortedList<E> extends TransformationList<E, E> {
                     var uiLatch = new CountDownLatch(1);
                     Platform.runLater(()-> {
                         LOGGER.fine("Starting update to UI thread");
-                        notifyChanges(processedChanges, notificationChanges, c);
+                        safeChange.reset();
+                        notifyChanges(processedChanges, notificationChanges, safeChange);
                         LOGGER.fine("Finished update to UI thread");
                         uiLatch.countDown();
                     });
@@ -284,16 +286,18 @@ public final class SortedList<E> extends TransformationList<E, E> {
      * changes made.
      */
     private List<Runnable> doChanges(Change<? extends E> c) {
-        var updateNotifications = new ArrayList<Runnable>();
-        LOGGER.info("Starting changes.");
-        while (c.next()) {
-           var updateNotification = update(c);
-           if (updateNotification != null) {
-               updateNotifications.add(updateNotification);
+        synchronized (stateLock) {
+            var updateNotifications = new ArrayList<Runnable>();
+            LOGGER.info("Starting changes.");
+            while (c.next()) {
+                var updateNotification = update(c);
+                if (updateNotification != null) {
+                    updateNotifications.add(updateNotification);
+                }
            }
+            LOGGER.info("Finished changes.");
+            return updateNotifications;
         }
-        LOGGER.info("Finished changes.");
-        return updateNotifications;
     }
     
     /**
@@ -384,7 +388,13 @@ public final class SortedList<E> extends TransformationList<E, E> {
      * necessary for downstream listeners.
      * @param current The current comparator if set.
      */
-    private synchronized Permutation invalidationTask(Comparator<? super E> current) {
+    private Permutation invalidationTask(Comparator<? super E> current) {
+        synchronized (stateLock) {
+            return invalidationTaskLocked(current);
+        }
+    }
+
+    private Permutation invalidationTaskLocked(Comparator<? super E> current) {
         LOGGER.fine("Starting invalidation task.");
         var lastSorted = new ArrayList<Element<E>>(sorted.size());
         var lastFiltered = new ArrayList<Element<E>>();
@@ -531,17 +541,19 @@ public final class SortedList<E> extends TransformationList<E, E> {
      * @throws IndexOutOfBoundsException {@inheritDoc}
      */
     @Override
-    public synchronized E get(int index) {
-        if (applyFilter) {
-            return filteredList.filtered().get(index).element();
-        } else if (elementComparator != null) {
-            if (index >= sorted.size()) {
-                LOGGER.log(Level.WARNING, "IndexOutOFBoundsException index: {0}, sortedSize: {1}", new Object[]{index, sorted.size()});
-                throw new IndexOutOfBoundsException();
+    public E get(int index) {
+        synchronized (stateLock) {
+            if (applyFilter) {
+                return filteredList.filtered().get(index).element();
+            } else if (elementComparator != null) {
+                if (index >= sorted.size()) {
+                    LOGGER.log(Level.WARNING, "IndexOutOFBoundsException index: {0}, sortedSize: {1}", new Object[]{index, sorted.size()});
+                    throw new IndexOutOfBoundsException();
+                }
+                return sorted.get(index).element();
             }
-            return sorted.get(index).element();
+            return unsorted.get(index).element();
         }
-        return unsorted.get(index).element();
     }
 
     /**
@@ -551,10 +563,12 @@ public final class SortedList<E> extends TransformationList<E, E> {
      */
     @Override
     public int size() {
-        if (applyFilter) {
-            return filteredList.size();
+        synchronized (stateLock) {
+            if (applyFilter) {
+                return filteredList.size();
+            }
+            return size.get();
         }
-        return size.get();       
     }
 
     /**
@@ -565,20 +579,22 @@ public final class SortedList<E> extends TransformationList<E, E> {
      * @return The index from the original (unsorted) list.
      */
     @Override
-    public synchronized int getSourceIndex(int viewIndex) {
-        if (applyFilter) {
-            if (viewIndex < filteredList.filtered().size()) {
-                var element = filteredList.filtered().get(viewIndex);
+    public int getSourceIndex(int viewIndex) {
+        synchronized (stateLock) {
+            if (applyFilter) {
+                if (viewIndex < filteredList.filtered().size()) {
+                    var element = filteredList.filtered().get(viewIndex);
+                    var unsortedIndex =  Collections.binarySearch(unsortedById, new IdAndIndex(element.id(), 0), idComparator);
+                    return unsortedIndex >= 0 ? unsortedById.get(unsortedIndex).index() : -1;
+                }
+                return -1;
+            } else if (elementComparator != null) {
+                var element = sorted.get(viewIndex);
                 var unsortedIndex =  Collections.binarySearch(unsortedById, new IdAndIndex(element.id(), 0), idComparator);
-                return unsortedById.get(unsortedIndex).index();
-            } 
-            return -1;
-        } else if (elementComparator != null) {
-            var element = sorted.get(viewIndex);
-            var unsortedIndex =  Collections.binarySearch(unsortedById, new IdAndIndex(element.id(), 0), idComparator);
-            return unsortedById.get(unsortedIndex).index();
+                return unsortedIndex >= 0 ? unsortedById.get(unsortedIndex).index() : -1;
+            }
+            return viewIndex;
         }
-        return viewIndex;
     }
 
     /**
@@ -588,19 +604,21 @@ public final class SortedList<E> extends TransformationList<E, E> {
      * @return The index for the same record from the source list.
      */
     @Override
-    public synchronized int getViewIndex(int sourceIndex) {
-        var element = unsorted.get(sourceIndex);
-        if (applyFilter) {
-            var index =  Collections.binarySearch(filteredList.filteredById(), new IdAndIndex(element.id(), 0), idComparator);
-            if (index >= 0) {
-                return filteredList.filteredById().get(index).index();
+    public int getViewIndex(int sourceIndex) {
+        synchronized (stateLock) {
+            var element = unsorted.get(sourceIndex);
+            if (applyFilter) {
+                var index =  Collections.binarySearch(filteredList.filteredById(), new IdAndIndex(element.id(), 0), idComparator);
+                if (index >= 0) {
+                    return filteredList.filteredById().get(index).index();
+                }
+                return index;
+            } else if (elementComparator != null) {
+                var sortedIndex = Collections.binarySearch(sortedById, new IdAndIndex(element.id(), 0), idComparator);
+                return sortedIndex >= 0 ? sortedById.get(sortedIndex).index() : -1;
             }
-            return index;
-        } else if (elementComparator != null) {
-            var sortedIndex =  Collections.binarySearch(sortedById, new IdAndIndex(element.id(), 0), idComparator);
-            return sortedById.get(sortedIndex).index();
+            return sourceIndex;
         }
-        return sourceIndex;
     }
     
     /**
@@ -644,13 +662,10 @@ public final class SortedList<E> extends TransformationList<E, E> {
             updateIndexes(unsorted, unsortedById);
         } else {
             LOGGER.log(Level.FINE, "Updating inexes for non add change.");
-            ForkJoinTask.invokeAll(ForkJoinTask.adapt(()->{
-                updateIndexes(sorted, sortedById);
-            }), ForkJoinTask.adapt(()->{
-                updateIndexes(unsorted, unsortedById);
-            }), ForkJoinTask.adapt(()->{
-                updateIndexes(filteredList.filtered(), filteredList.filteredById());
-            }));
+            ForkJoinTask.invokeAll(
+                    ForkJoinTask.adapt(() -> updateIndexes(sorted, sortedById)),
+                    ForkJoinTask.adapt(() -> updateIndexes(unsorted, unsortedById)),
+                    ForkJoinTask.adapt(() -> updateIndexes(filteredList.filtered(), filteredList.filteredById())));
         }
         LOGGER.fine("Finished processing change in update method.");
         return updateNotification;
@@ -693,23 +708,20 @@ public final class SortedList<E> extends TransformationList<E, E> {
         elementsToRemove.addAll(unsorted.subList(c.getFrom(), removedTo));
         var removeIndexes = new ArrayList<IndexAndElement<E>>();
         var removeFilteredIndexes = new ArrayList<Element<E>>();
-        ForkJoinTask.invokeAll(ForkJoinTask.adapt(()->{
-            if (elementComparator != null) {
-                buildRemoveIndexesSorted(elementsToRemove, removeIndexes);
-                removeIndexes.forEach(index -> {
-                    sorted.remove((int)index.index);                    
-                });
+        if (elementComparator != null) {
+            updateIndexes(sorted, sortedById);
+            buildRemoveIndexesSorted(elementsToRemove, removeIndexes);
+            removeIndexes.forEach(index -> {
+                sorted.remove((int)index.index);
+            });
+        }
+        for (int i = removedTo - 1; i >= c.getFrom(); i--) {
+            unsorted.remove(i);
+            if (elementComparator == null) {
+                sorted.remove(i);
             }
-        }), ForkJoinTask.adapt(()->{
-            for (int i = removedTo - 1; i >= c.getFrom(); i--) {
-                unsorted.remove(i);
-                if (elementComparator == null) {
-                    sorted.remove(i);
-                }
-            }
-        }), ForkJoinTask.adapt(()->{
-            removeFilteredIndexes.addAll(filteredList.doRemove(elementsToRemove));
-        }));
+        }
+        removeFilteredIndexes.addAll(filteredList.doRemove(elementsToRemove));
         var hadComparator = elementComparator != null;
         var wasFiltered = applyFilter;
         LOGGER.fine("Finished remove.");
@@ -732,7 +744,11 @@ public final class SortedList<E> extends TransformationList<E, E> {
         for (int i = 0; i < elementsToRemove.size(); i++) {
             var e = elementsToRemove.get(i);
             var searchResult = Collections.binarySearch(sortedById, new IdAndIndex(e.id(), 0), idComparator);
-            removeIndexes.add(new IndexAndElement<>(sortedById.get(searchResult).index(), e.element()));
+            if (searchResult >= 0) {
+                removeIndexes.add(new IndexAndElement<>(sortedById.get(searchResult).index(), e.element()));
+            } else {
+                LOGGER.log(Level.WARNING, "Removed element ID {0} was not present in sorted index.", e.id());
+            }
         }
         Collections.sort(removeIndexes, (e1, e2)-> Long.compare(e2.index, e1.index));
     }
@@ -837,7 +853,9 @@ public final class SortedList<E> extends TransformationList<E, E> {
         var updateIndexes = new ArrayList<Integer>();
         if (elementComparator != null) {
             for (int i = c.getFrom(), to = c.getTo(); i < to; ++i) {
-                var unsortedElement = unsorted.get(i);
+                var previousElement = unsorted.get(i);
+                Element<E> unsortedElement = new Element<>(previousElement.id(), c.getList().get(i));
+                unsorted.set(i, unsortedElement);
                 var sortedByIdIndex = Collections.binarySearch(sortedById, new IdAndIndex(unsortedElement.id(), 0), idComparator);
                 var sortedElementWithId = sortedById.get(sortedByIdIndex);
                 sorted.remove(sortedElementWithId.index());
@@ -911,19 +929,29 @@ public final class SortedList<E> extends TransformationList<E, E> {
     public void setFilter(Predicate<E> predicate) {
         if (threaded) {
             es.submit(() -> {
-                applyPredicateChange(predicate);
-                var elementsToRemove = filteredList.getElements();
+                List<E> elementsToRemove;
+                synchronized (stateLock) {
+                    applyPredicateChange(predicate);
+                    elementsToRemove = filteredList.getElements();
+                }
                 threadRemoveFilteredElements(elementsToRemove);
-                filteredList.reset();
-                loadFilteredList();
+                synchronized (stateLock) {
+                    filteredList.reset();
+                    loadFilteredList();
+                }
                 threadNotifyUiFilteredChange(predicate);
             });
         } else {
-            applyPredicateChange(predicate);
-            var elementsToRemove = filteredList.getElements();
+            List<E> elementsToRemove;
+            synchronized (stateLock) {
+                applyPredicateChange(predicate);
+                elementsToRemove = filteredList.getElements();
+            }
             removeFilteredElements(elementsToRemove);
-            filteredList.reset();
-            loadFilteredList();
+            synchronized (stateLock) {
+                filteredList.reset();
+                loadFilteredList();
+            }
             notifyUiFilteredChange(predicate);
         }
     }
@@ -1005,7 +1033,9 @@ public final class SortedList<E> extends TransformationList<E, E> {
     }
     
     public boolean getApplyFilter() {
-        return applyFilter;
+        synchronized (stateLock) {
+            return applyFilter;
+        }
     }
            
 }
