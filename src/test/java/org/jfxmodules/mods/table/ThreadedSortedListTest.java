@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -177,6 +178,61 @@ public class ThreadedSortedListTest {
         assertEquals(Arrays.asList("2", "2", "2", "2"), sortedList.subList(0, 4));
         assertEquals(Arrays.asList("6", "6", "6", "6"), sortedList.subList(4, sortedList.size()));
     }    
+
+    @Test
+    public void testLatestFilterRequestWins() throws InterruptedException {
+        var applied = new CountDownLatch(1);
+        sortedList.addListener((ListChangeListener<String>) change -> {
+            while (change.next()) {
+                if (sortedList.size() == 1 && "d".equals(sortedList.get(0))) {
+                    applied.countDown();
+                }
+            }
+        });
+
+        sortedList.setFilter(value -> "a".equals(value));
+        sortedList.setFilter(value -> "c".equals(value));
+        sortedList.setFilter(value -> "d".equals(value));
+
+        assertTrue(applied.await(2, TimeUnit.SECONDS));
+        assertEquals(List.of("d"), sortedList);
+    }
+
+    @Test
+    public void testCachedSortKeyRefreshesForAddedAndUpdatedRecords() throws InterruptedException {
+        var keyCalls = new AtomicInteger();
+        var sorted = new SortedList<String>(list, true);
+        var initialSort = new CountDownLatch(1);
+        var added = new CountDownLatch(1);
+        var updated = new CountDownLatch(1);
+        var notifications = new AtomicInteger();
+        sorted.addListener((ListChangeListener<String>) change -> {
+            switch (notifications.incrementAndGet()) {
+                case 1 -> initialSort.countDown();
+                case 2 -> added.countDown();
+                case 3 -> updated.countDown();
+                default -> { }
+            }
+        });
+
+        sorted.setSortKey(value -> {
+            keyCalls.incrementAndGet();
+            return value;
+        });
+        assertTrue(initialSort.await(2, TimeUnit.SECONDS));
+        assertEquals(List.of("a", "c", "c", "d"), sorted);
+        assertEquals(4, keyCalls.get());
+
+        list.add("b");
+        assertTrue(added.await(2, TimeUnit.SECONDS));
+        assertEquals(List.of("a", "b", "c", "c", "d"), sorted);
+        assertEquals(5, keyCalls.get());
+
+        list.set(0, "e");
+        assertTrue(updated.await(2, TimeUnit.SECONDS));
+        assertEquals(List.of("b", "c", "c", "d", "e"), sorted);
+        assertEquals(6, keyCalls.get());
+    }
     
     @Test
     public void testThreadSafeChange() {

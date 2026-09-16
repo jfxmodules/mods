@@ -20,12 +20,16 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinTask;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -145,9 +149,14 @@ public final class SortedList<E> extends TransformationList<E, E> {
     
     private Comparator<Element<E>> elementComparator;
     private final Comparator<IdAndIndex> idComparator = (e1, e2)->Long.compare(e1.id(), e2.id());
+    private Function<? super E, String> sortKeyExtractor;
+    private Comparator<String> sortKeyComparator;
+    private final Map<Long, String> sortKeys = new HashMap<>();
     private final boolean threaded;
     private final ExecutorService es = Executors.newSingleThreadExecutor();
     private final Object stateLock = new Object();
+    private final AtomicLong filterGeneration = new AtomicLong();
+    private final AtomicLong comparatorGeneration = new AtomicLong();
     private boolean applyFilter;    
     private long lastId = 0;    
     private final AtomicInteger size = new AtomicInteger(0);
@@ -173,8 +182,16 @@ public final class SortedList<E> extends TransformationList<E, E> {
         sortedById = new ArrayList<>(source.size());
         unsorted = new ArrayList<>(source.size());
         unsortedById = new ArrayList<>();
-        setComparator(comparator);
-        loadElements(source);
+        if (threaded) {
+            loadElements(source);
+            if (comparator != null) {
+                sorted.addAll(unsorted);
+            }
+            setComparator(comparator);
+        } else {
+            setComparator(comparator);
+            loadElements(source);
+        }
         maybeSortAndReIndex(sorted, sortedById);
         filteredList = new FilteredList<>();
     }
@@ -341,7 +358,11 @@ public final class SortedList<E> extends TransformationList<E, E> {
                     LOGGER.log(Level.FINE, "Start invalidating list.");
                     Comparator<? super E> current = get();
                     if (threaded) {
+                        long generation = comparatorGeneration.incrementAndGet();
                         es.submit(()->{
+                            if (comparatorGeneration.get() != generation) {
+                                return;
+                            }
                             var permutation = invalidationTask(current);
                             if (permutation.changed) {
                                 var latch = new CountDownLatch(1);
@@ -411,11 +432,16 @@ public final class SortedList<E> extends TransformationList<E, E> {
             sorted.clear();
             sorted.addAll(unsorted);
             LOGGER.fine("Done clearing the list in invalidationTask.");
+        } else if (current != null) {
+            sorted.clear();
+            sorted.addAll(unsorted);
         }
         lastUnsorted.addAll(unsorted);
 
         if (current != null) {
-            elementComparator = new ElementComparator<>(current);
+                elementComparator = sortKeyExtractor == null
+                    ? new ElementComparator<>(current)
+                    : new ElementComparator<>(current, sortKeys, sortKeyComparator);
             sorted.sort(elementComparator);
             if (applyFilter) {
                 filteredList.sort(elementComparator);
@@ -530,7 +556,45 @@ public final class SortedList<E> extends TransformationList<E, E> {
      * @param comparator 
      */
     public final void setComparator(Comparator<? super E> comparator) {
+        synchronized (stateLock) {
+            sortKeyExtractor = null;
+            sortKeyComparator = null;
+            sortKeys.clear();
+        }
         comparatorProperty().set(comparator);
+    }
+
+    /**
+     * Sort using a cached string key extracted from each element.
+     *
+     * @param keyExtractor creates the key used for sorting
+     */
+    public void setSortKey(Function<? super E, String> keyExtractor) {
+        setSortKey(keyExtractor, Comparator.naturalOrder());
+    }
+
+    /**
+     * Sort using a cached string key extracted from each element.
+     *
+     * @param keyExtractor creates the key used for sorting
+     * @param keyComparator compares the extracted keys
+     */
+    public void setSortKey(Function<? super E, String> keyExtractor,
+            Comparator<String> keyComparator) {
+        if (keyExtractor == null) {
+            setComparator(null);
+            return;
+        }
+        synchronized (stateLock) {
+            sortKeyExtractor = keyExtractor;
+            sortKeyComparator = Comparator.nullsFirst(keyComparator);
+            sortKeys.clear();
+            for (Element<E> element : unsorted) {
+                sortKeys.put(element.id(), keyExtractor.apply(element.element()));
+            }
+        }
+        comparatorProperty().set((left, right) -> sortKeyComparator.compare(
+                keyExtractor.apply(left), keyExtractor.apply(right)));
     }
 
     /**
@@ -706,6 +770,7 @@ public final class SortedList<E> extends TransformationList<E, E> {
         final int removedTo = c.getFrom() + c.getRemovedSize();
         var elementsToRemove = new ArrayList<Element<E>>(c.getRemovedSize());
         elementsToRemove.addAll(unsorted.subList(c.getFrom(), removedTo));
+        elementsToRemove.forEach(element -> sortKeys.remove(element.id()));
         var removeIndexes = new ArrayList<IndexAndElement<E>>();
         var removeFilteredIndexes = new ArrayList<Element<E>>();
         if (elementComparator != null) {
@@ -767,6 +832,9 @@ public final class SortedList<E> extends TransformationList<E, E> {
         var add = c.getAddedSubList().stream()
                 .map((element) -> {
                     var e = new Element<E>(lastId++, element);
+                    if (sortKeyExtractor != null) {
+                        sortKeys.put(e.id(), sortKeyExtractor.apply(element));
+                    }
                     if (elementComparator != null) {
                         var pos = Collections.binarySearch(sorted, e, elementComparator);
                         if (pos < 0) {
@@ -856,6 +924,9 @@ public final class SortedList<E> extends TransformationList<E, E> {
                 var previousElement = unsorted.get(i);
                 Element<E> unsortedElement = new Element<>(previousElement.id(), c.getList().get(i));
                 unsorted.set(i, unsortedElement);
+                if (sortKeyExtractor != null) {
+                    sortKeys.put(unsortedElement.id(), sortKeyExtractor.apply(unsortedElement.element()));
+                }
                 var sortedByIdIndex = Collections.binarySearch(sortedById, new IdAndIndex(unsortedElement.id(), 0), idComparator);
                 var sortedElementWithId = sortedById.get(sortedByIdIndex);
                 sorted.remove(sortedElementWithId.index());
@@ -902,14 +973,26 @@ public final class SortedList<E> extends TransformationList<E, E> {
     protected static class ElementComparator<E> implements Comparator<Element<E>> {
 
         private final Comparator<? super E> comparator;
+        private final Map<Long, String> sortKeys;
+        private final Comparator<String> sortKeyComparator;
 
         public ElementComparator(Comparator<? super E> comparator) {
+            this(comparator, null, null);
+        }
+
+        public ElementComparator(Comparator<? super E> comparator,
+                Map<Long, String> sortKeys, Comparator<String> sortKeyComparator) {
             this.comparator = comparator;
+            this.sortKeys = sortKeys;
+            this.sortKeyComparator = sortKeyComparator;
         }
 
         @Override
         @SuppressWarnings("unchecked")
         public int compare(Element<E> o1, Element<E> o2) {
+            if (sortKeys != null) {
+                return sortKeyComparator.compare(sortKeys.get(o1.id()), sortKeys.get(o2.id()));
+            }
             return comparator.compare(o1.element(), o2.element());
         }
     }
@@ -927,10 +1010,17 @@ public final class SortedList<E> extends TransformationList<E, E> {
      * @param predicate
      */
     public void setFilter(Predicate<E> predicate) {
+        long generation = filterGeneration.incrementAndGet();
         if (threaded) {
             es.submit(() -> {
+                if (filterGeneration.get() != generation) {
+                    return;
+                }
                 List<E> elementsToRemove;
                 synchronized (stateLock) {
+                    if (filterGeneration.get() != generation) {
+                        return;
+                    }
                     applyPredicateChange(predicate);
                     elementsToRemove = filteredList.getElements();
                 }
